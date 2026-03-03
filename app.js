@@ -55,6 +55,548 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('>> NEXUS OWNER EDITION INITIALIZED');
     initMatrixBackground();
     checkAuth();
+    
+    // Проверяем, есть ли пост в URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const postId = urlParams.get('post');
+    if (postId) {
+        setTimeout(() => {
+            openPostById(postId);
+        }, 1500);
+    }
+});
+
+function initMatrixBackground() {
+    const container = document.getElementById('matrix-bg');
+    if (!container) return;
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'width:100%;height:100%;';
+    container.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const chars = '0123456789ABCDEF';
+    const fontSize = 14;
+    const columns = canvas.width / fontSize;
+    const drops = [];
+    for (let i = 0; i < columns; i++) drops[i] = Math.random() * -100;
+    function draw() {
+        ctx.fillStyle = 'rgba(5,5,5,0.05)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#0f0';
+        ctx.font = fontSize + 'px monospace';
+        for (let i = 0; i < drops.length; i++) {
+            ctx.fillText(chars[Math.floor(Math.random() * chars.length)], i * fontSize, drops[i] * fontSize);
+            if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
+            drops[i]++;
+        }
+    }
+    setInterval(draw, 35);
+}
+
+// === АВТОРИЗАЦИЯ ===
+window.checkAuth = async function() {
+    try {
+        const saved = localStorage.getItem('nexus_user');
+        if (saved) {
+            currentUser = JSON.parse(saved);
+            const { data: user, error } = await _supabase
+                .from('users')
+                .select('*')
+                .eq('id', currentUser.id)
+                .single();
+                
+            if (error || !user) {
+                localStorage.removeItem('nexus_user');
+                showRegistration();
+                return;
+            }
+            currentUser = user;
+            localStorage.setItem('nexus_user', JSON.stringify(currentUser));
+            showMainScreen();
+            
+            // Показываем приветствие для новых пользователей
+            checkWelcomeModal();
+        } else {
+            showRegistration();
+        }
+    } catch (err) {
+        console.error('Auth error:', err);
+        showRegistration();
+    }
+};
+
+// === ПРОВЕРКА И ПОКАЗ ПРИВЕТСТВИЯ ===
+async function checkWelcomeModal() {
+    try {
+        const { data: welcome } = await _supabase
+            .from('user_welcome')
+            .select('*')
+            .eq('user_id', currentUser.id)
+            .single();
+        
+        if (!welcome || !welcome.welcomed) {
+            setTimeout(() => {
+                showWelcomeModal();
+            }, 1000);
+            
+            if (welcome) {
+                await _supabase
+                    .from('user_welcome')
+                    .update({ welcomed: true })
+                    .eq('user_id', currentUser.id);
+            } else {
+                await _supabase
+                    .from('user_welcome')
+                    .insert([{ user_id: currentUser.id, welcomed: true }]);
+            }
+        }
+    } catch (err) {
+        console.error('Welcome check error:', err);
+    }
+}
+
+window.showWelcomeModal = function() {
+    const modal = document.getElementById('welcome-modal');
+    if (modal) {
+        modal.classList.add('active');
+    }
+};
+
+window.closeWelcomeModal = function() {
+    const modal = document.getElementById('welcome-modal');
+    if (modal) {
+        modal.classList.remove('active');
+    }
+};
+
+window.showRegistration = function() {
+    const reg = document.getElementById('registration-screen');
+    const login = document.getElementById('login-screen');
+    const main = document.getElementById('main-content');
+    if (reg) reg.classList.remove('hidden');
+    if (login) login.classList.add('hidden');
+    if (main) main.classList.add('hidden');
+    showRegStep(1);
+    initClanSelector();
+    initAvatarPresets();
+};
+
+window.showLoginScreen = function() {
+    const reg = document.getElementById('registration-screen');
+    const login = document.getElementById('login-screen');
+    if (reg) reg.classList.add('hidden');
+    if (login) login.classList.remove('hidden');
+};
+
+function showRegStep(step) {
+    document.querySelectorAll('.cyber-reg-step').forEach(s => s.classList.add('hidden'));
+    const el = document.getElementById(`reg-step-${step}`);
+    if (el) el.classList.remove('hidden');
+    
+    document.querySelectorAll('.cyber-step').forEach(s => {
+        s.classList.remove('active', 'completed');
+        const n = parseInt(s.dataset.step);
+        if (n < step) s.classList.add('completed');
+        if (n === step) s.classList.add('active');
+    });
+    
+    const container = document.querySelector('.auth-screen');
+    if (container) {
+        container.scrollTop = 0;
+    }
+}
+
+window.registrationStep1 = async function() {
+    const realName = document.getElementById('reg-real-name')?.value.trim();
+    const email = document.getElementById('reg-email')?.value.trim();
+    const password = document.getElementById('reg-password')?.value.trim();
+    
+    if (!realName || realName.length < 2) { alert('Введите имя'); return; }
+    if (!email || !email.includes('@')) { alert('Введите email'); return; }
+    if (!password || password.length < 8) { alert('Пароль мин. 8 символов'); return; }
+    
+    const { data: existing, error } = await _supabase
+        .from('users')
+        .select('email')
+        .eq('email', email);
+        
+    if (error) { alert('Ошибка: ' + error.message); return; }
+    if (existing && existing.length > 0) { alert('Email занят'); return; }
+    
+    registrationData = { ...registrationData, realName, email, password };
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    registrationData.verificationCode = code;
+    alert('Код: ' + code);
+    
+    const info = document.getElementById('reg-email-info');
+    if (info) info.textContent = 'Код на ' + email;
+    showRegStep(2);
+};
+
+window.registrationStep2 = function() {
+    const code = document.getElementById('reg-verification-code')?.value.trim();
+    if (!code || code !== registrationData.verificationCode) { alert('Неверный код'); return; }
+    showRegStep(3);
+};
+
+window.resendCode = function() {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    registrationData.verificationCode = code;
+    alert('Новый код: ' + code);
+};
+
+window.registrationStep3 = async function() {
+    try {
+        let username = registrationData.realName.toLowerCase().replace(/[^a-z0-9а-яё]/g, '') || 'user';
+        let counter = 1;
+        
+        while (true) {
+            const { data: ex } = await _supabase
+                .from('users')
+                .select('username')
+                .eq('username', username)
+                .single();
+                
+            if (!ex) break;
+            username = username + counter;
+            counter++;
+            if (counter > 1000) { username = 'user_' + Date.now(); break; }
+        }
+        
+        const isOwner = registrationData.email === ADMIN_EMAIL;
+        
+        const { data: user, error } = await _supabase
+            .from('users')
+            .insert([{
+                username: username,
+                email: registrationData.email,
+                real_name: registrationData.realName,
+                password_hash: btoa(registrationData.password),
+                email_verified: true,
+                clan: registrationData.clan,
+                emoji: registrationData.avatarPreset,
+                avatar_preset: registrationData.avatarPreset,
+                avatar_url: registrationData.avatarUrl,
+                banner_url: registrationData.banner,
+                is_owner: isOwner,
+                role: isOwner ? 'owner' : 'user'
+            }])
+            .select()
+            .single();
+            
+        if (error) { 
+            alert('Ошибка: ' + error.message); 
+            return; 
+        }
+        
+        currentUser = user;
+        localStorage.setItem('nexus_user', JSON.stringify(currentUser));
+        alert('✅ Добро пожаловать, ' + (isOwner ? 'OWNER!' : 'пользователь!'));
+        showMainScreen();
+        
+        setTimeout(() => {
+            showWelcomeModal();
+        }, 1000);
+        
+        await _supabase
+            .from('user_welcome')
+            .insert([{ user_id: user.id, welcomed: true }]);
+            
+    } catch (err) {
+        alert('Ошибка: ' + err.message);
+    }
+};
+
+// === КЛАНЫ ===
+function initClanSelector() {
+    const c = document.getElementById('clan-selector');
+    if (!c) return;
+    c.innerHTML = '';
+    
+    clans.forEach(clan => {
+        const d = document.createElement('div');
+        d.className = 'cyber-clan-option' + (clan.name === registrationData.clan ? ' selected' : '');
+        d.style.borderColor = clan.color;
+        
+        d.onclick = () => { 
+            registrationData.clan = clan.name; 
+            document.querySelectorAll('.cyber-clan-option').forEach(e => e.classList.remove('selected')); 
+            d.classList.add('selected'); 
+        };
+        
+        d.innerHTML = '<div class="cyber-clan-icon" style="color:'+clan.color+'">'+clan.icon+'</div>' +
+                     '<div class="cyber-clan-name">'+clan.name+'</div>' +
+                     '<div class="cyber-clan-desc">'+clan.desc+'</div>';
+        c.appendChild(d);
+    });
+}
+
+function initAvatarPresets() {
+    const c = document.getElementById('avatar-presets');
+    if (!c) return;
+    c.innerHTML = '';
+    
+    emojis.forEach(emoji => {
+        const d = document.createElement('div');
+        d.className = 'cyber-avatar-preset' + (emoji === registrationData.avatarPreset ? ' selected' : '');
+        
+        d.onclick = () => { 
+            registrationData.avatarPreset = emoji; 
+            registrationData.avatarUrl = null; 
+            document.querySelectorAll('.cyber-avatar-preset').forEach(e => e.classList.remove('selected')); 
+            d.classList.add('selected'); 
+        };
+        
+        d.textContent = emoji;
+        d.style.borderColor = '#00ff88';
+        c.appendChild(d);
+    });
+}
+
+// === ЗАГРУЗКА АВАТАРА ПРИ РЕГИСТРАЦИИ ===
+window.uploadRegistrationAvatar = async function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { 
+        alert('Макс. 5MB'); 
+        return; 
+    }
+    
+    try {
+        const ext = file.name.split('.').pop();
+        const fn = 'reg_avatar_' + Date.now() + '.' + ext;
+        
+        const { error: ue } = await _supabase.storage
+            .from('user-avatars')
+            .upload(fn, file, { cacheControl: '3600', upsert: true });
+            
+        if (ue) { 
+            alert('Ошибка: ' + ue.message); 
+            return; 
+        }
+        
+        const { data: ud2 } = _supabase.storage
+            .from('user-avatars')
+            .getPublicUrl(fn);
+            
+        registrationData.avatarUrl = ud2?.publicUrl || null;
+        registrationData.avatarPreset = null;
+        
+        alert('✅ Аватар загружен');
+    } catch (err) { 
+        alert('Ошибка: ' + err.message); 
+    }
+};
+
+// === OWNER ПРОВЕРКИ ===
+function isOwner(user) {
+    return user?.email === ADMIN_EMAIL || user?.is_owner === true || user?.role === 'owner';
+}
+
+function formatUsername(user, forDisplay = false) {
+    if (!user) return 'UNKNOWN';
+    if (isOwner(user)) {
+        if (forDisplay) return '[owner] ' + user.username;
+        return '<span class="owner-username" title="Владелец системы">✓ ' + user.username + '</span>';
+    }
+    return escapeHtml(user.username);
+}
+
+// === ОСНОВНОЙ ЭКРАН ===
+window.showMainScreen = function() {
+    document.getElementById('registration-screen')?.classList.add('hidden');
+    document.getElementById('login-screen')?.classList.add('hidden');
+    
+    const main = document.getElementById('main-content');
+    const nav = document.getElementById('bottom-nav');
+    
+    if (main) { 
+        main.classList.remove('hidden'); 
+        main.style.display = 'block'; 
+    }
+    if (nav) nav.style.display = 'flex';
+    
+    const adminNav = document.getElementById('admin-nav-item');
+    const newsNav = document.getElementById('news-nav-item');
+    
+    if (adminNav) {
+        adminNav.style.display = isOwner(currentUser) ? 'flex' : 'none';
+    }
+    
+    if (newsNav) {
+        newsNav.style.display = 'flex';
+    }
+    
+    const emoji = document.getElementById('user-emoji');
+    const name = document.getElementById('user-name');
+    
+    if (emoji) {
+        if (currentUser.avatar_url) {
+            emoji.innerHTML = '<img src="' + currentUser.avatar_url + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">';
+        } else {
+            emoji.textContent = currentUser.emoji || currentUser.avatar_preset || '👤';
+        }
+    }
+    
+    if (name) {
+        if (isOwner(currentUser)) {
+            name.innerHTML = '<span class="owner-username">✓ ' + currentUser.username + '</span>';
+        } else {
+            name.textContent = '@' + currentUser.username;
+        }
+    }
+    
+    window.switchTab('feed');
+};
+
+window.logout = function() {
+    localStorage.removeItem('nexus_user');
+    location.reload();
+};
+
+// === НАВИГАЦИЯ ===
+window.switchTab = function(tab) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    document.querySelectorAll('.cyber-nav-item').forEach(b => b.classList.remove('active'));
+    
+    const target = document.getElementById(tab + '-tab');
+    if (target) target.classList.remove('hidden');
+    
+    const btn = document.querySelector('.cyber-nav-item[data-tab="' + tab + '"]');
+    if (btn) btn.classList.add('active');
+    
+    if (tab === 'feed') loadPosts();
+    else if (tab === 'clan') loadClanChat();
+    else if (tab === 'profile') showProfile(currentUser.id);
+    else if (tab === 'admin') showAdminPanel();
+    else if (tab === 'news') loadNews();
+};
+
+// === ЗАГРУЗКА НОВОСТЕЙ ===
+window.loadNews = async function() {
+    const container = document.getElementById('news-container');
+    if (!container) return;
+    
+    container.innerHTML = '<div class="loading">>> ЗАГРУЗКА НОВОСТЕЙ...</div>';
+    
+    const { data: news, error } = await _supabase
+        .from('news')
+        .select('*, users:author_id(username, email, is_owner)')
+        .order('created_at', { ascending: false });
+    
+    if (error) {
+        container.innerHTML = '>> ОШИБКА ЗАГРУЗКИ';
+        return;
+    }
+    
+    if (!news || news.length === 0) {
+        container.innerHTML = '<div class="cyber-post">>> НОВОСТЕЙ ПОКА НЕТ</div>';
+        return;
+    }
+    
+    container.innerHTML = '';
+    
+    news.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'cyber-post news-post';
+        
+        const authorName = item.users ? formatUsername(item.users, true) : 'NEXUS';
+        const time = new Date(item.created_at).toLocaleString('ru-RU', { 
+            day: 'numeric', 
+            month: 'long', 
+            hour: '2-digit', 
+            minute: '2-digit' 
+        });
+        
+        let imageHtml = '';
+        if (item.image_url) {
+            imageHtml = '<div class="cyber-news-image"><img src="' + item.image_url + '" style="width:100%;border-radius:var(--radius-md);"></div>';
+        }
+        
+        div.innerHTML = '<div class="cyber-post-header">' +
+            '<div class="cyber-user-identity">' +
+            '<div class="cyber-user-avatar">📢</div>' +
+            '<span class="cyber-username">' + authorName + '</span>' +
+            '</div>' +
+            '<span class="cyber-post-time">' + time + '</span>' +
+            '</div>' +
+            '<h3 style="color:var(--green); margin-bottom:10px;">' + escapeHtml(item.title) + '</h3>' +
+            imageHtml +
+            '<div class="cyber-post-content" style="white-space:pre-line;">' + escapeHtml(item.content) + '</div>';
+        
+        container.appendChild(div);
+    });
+};
+
+// === ЗАГРУЗКА ПОСТОВ ===
+window.loadPosts = async function(feedType = 'all') {
+    currentFeed = feedType;
+    const feed = document.getElementById('feed');
+    if (!feed) return;
+    
+    feed.innerHTML = '<div class="loading">>> ЗАГРУЗКА...</div>';
+    
+    let query = _supabase
+        .from('posts')
+        .select('*, users:user_id(username, avatar_preset, avatar_url, emoji, clan, email, is_owner, role)')
+        .order('created_at', { ascending: false });
+    
+    const { data: posts, error } = await query;
+    
+    if (error) { 
+        feed.innerHTML = '>> ОШИБКА: ' + error.message; 
+        return; 
+    }
+    
+    feed.innerHTML = '';
+    
+    if (!posts || posts.length === 0) { 
+        feed.innerHTML = '<div class="cyber-post">>> НЕТ ПОСТОВ</div>'; 
+        return; 
+    }
+    
+    const { data: likes } = await _supabase
+        .from('likes')
+        .select('post_id')
+        .eq('user_id', currentUser.id);
+        
+    const liked = likes?.map(l => l.post_id) || [];
+    
+    let filteredPosts = posts;
+    if (feedType === 'clan' && currentUser.clan) {
+        filteredPosts = posts.filter(post => post.users?.clan === currentUser.clan);
+    }
+    
+    filteredPosts.forEach(post => {
+        const div = createPostElement(post, liked.includes(post.id));
+        feed.appendChild(div);
+    });
+};
+
+// === КНОПКИ ФИЛЬТРА ЛЕНТЫ ===
+window.toggleFeedFilter = function(type) {
+    document.querySelect    { name: 'Клан [Атакующие]', desc: 'Сила и мощь', icon: '⚔️', color: '#e74c3c' },
+    { name: 'Клан [Теневые личности]', desc: 'Невидимые, но влиятельные', icon: '🌑', color: '#9b59b6' },
+    { name: 'Клан [Забытые]', desc: 'Из пепла восставшие', icon: '🔥', color: '#e67e22' },
+    { name: 'Клан [Кодеры]', desc: 'Архитекторы реальности', icon: '💻', color: '#2ecc71' },
+    { name: 'Клан [Хакеры]', desc: 'Взломщики систем', icon: '🔓', color: '#1abc9c' },
+    { name: 'Клан [Анонимы]', desc: 'Без лица, без имени', icon: '🎭', color: '#34495e' },
+    { name: 'Клан [Нейросети]', desc: 'Искусственный интеллект', icon: '🧠', color: '#9b59b6' },
+    { name: 'Клан [Крипто]', desc: 'Властелины блокчейна', icon: '₿', color: '#f39c12' },
+    { name: 'Клан [Фантомы]', desc: 'Призраки сети', icon: '👻', color: '#bdc3c7' },
+    { name: 'Клан [Сталкеры]', desc: 'Охотники за данными', icon: '🎯', color: '#e74c3c' },
+    { name: 'Клан [Свободные]', desc: 'Без границ и правил', icon: '🕊️', color: '#3498db' }
+];
+
+const ADMIN_EMAIL = 'boombl4you@gmail.com';
+const OWNER_CLAN = 'Клан [owner]-а';
+
+// === ИНИЦИАЛИЗАЦИЯ ===
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('>> NEXUS OWNER EDITION INITIALIZED');
+    initMatrixBackground();
+    checkAuth();
 });
 
 function initMatrixBackground() {
