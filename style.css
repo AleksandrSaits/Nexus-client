@@ -1727,3 +1727,141 @@ body {
     max-width: 500px;
     border: 2px solid var(--green);
 }
+/* === КАРТИНКИ В ПОСТАХ === */
+.cyber-photo-display img {
+    width: 100%;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: transform 0.3s, box-shadow 0.3s;
+}
+
+.cyber-photo-display img:hover {
+    transform: scale(1.02);
+    box-shadow: var(--shadow-glow);
+    border-color: var(--green);
+}
+
+/* === МОДАЛКА ДЛЯ КАРТИНОК === */
+#image-modal .cyber-modal-content {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+/* === МЕДАЛЬКИ === */
+#profile-medals {
+    min-height: 60px;
+}
+
+.medal-item {
+    display: inline-block;
+    transition: all 0.3s;
+}
+
+.medal-item:hover {
+    transform: translateY(-5px);
+    filter: drop-shadow(0 0 10px gold);
+}
+
+/* === ВЕРИФИКАЦИЯ === */
+.verified-badge-large {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    width: 25px;
+    height: 25px;
+    background: var(--cyan);
+    border: 2px solid white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 0.8rem;
+    font-weight: 900;
+    box-shadow: 0 0 10px var(--cyan);
+    z-index: 2;
+}
+
+/* === БАН === */
+#profile-ban-info {
+    animation: pulse 2s infinite;
+}
+
+#profile-ban-info > div {
+    background: var(--red) !important;
+    color: white !important;
+    padding: 15px !important;
+    border-radius: var(--radius-md) !important;
+    margin: 10px 0 !important;
+    text-align: center !important;
+    font-weight: 600 !important;
+}
+
+/* === КНОПКИ OWNER === */
+#profile-owner-actions button {
+    flex: 1;
+    min-width: 120px;
+}
+
+/* === АВАТАР С ГАЛОЧКОЙ === */
+.cyber-avatar-large {
+    position: relative;
+}
+
+/* === СТИЛИ ДЛЯ НАСТРОЕК === */
+.settings-section {
+    margin-bottom: 20px;
+}
+
+.login-history-item {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+.login-history-item:last-child {
+    border-bottom: none;
+}
+
+#bin-code-display {
+    font-family: monospace;
+    background: var(--bg-secondary);
+    border: 2px solid var(--green);
+    color: var(--green);
+    padding: 15px;
+    text-align: center;
+    font-size: 2rem;
+    letter-spacing: 5px;
+    border-radius: var(--radius-md);
+    margin: 10px 0;
+}
+
+/* === РЕАКЦИИ === */
+.reaction-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 5px 10px;
+    border-radius: var(--radius-full);
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.reaction-btn:hover {
+    background: var(--bg-secondary);
+    transform: scale(1.1);
+}
+
+.reaction-btn.active {
+    color: var(--green);
+    background: var(--green-dim);
+}
+
+.reaction-count {
+    font-size: 0.8rem;
+    font-weight: 600;
+}

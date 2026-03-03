@@ -14,6 +14,9 @@ let currentPostId = null;
 let repostPostId = null;
 let currentProfileUser = null;
 let selectedBanner = 'default';
+let notificationsInterval = null;
+let currentChatUser = null;
+let userSettings = null;
 
 let registrationData = {
     realName: '', email: '', password: '', verificationCode: '',
@@ -50,11 +53,50 @@ const clans = [
 const ADMIN_EMAIL = 'boombl4you@gmail.com';
 const OWNER_CLAN = 'Клан [owner]-а';
 
+// === ТЕМЫ ===
+const themes = {
+    dark: {
+        '--bg': '#050505',
+        '--bg-secondary': '#0a0a0a',
+        '--bg-card': '#0f0f0f',
+        '--text': '#ffffff',
+        '--text-dim': '#666666',
+        '--border': '#1a1a1a',
+        name: 'Тёмная'
+    },
+    light: {
+        '--bg': '#f5f5f5',
+        '--bg-secondary': '#ffffff',
+        '--bg-card': '#ffffff',
+        '--text': '#000000',
+        '--text-dim': '#666666',
+        '--border': '#dddddd',
+        name: 'Светлая'
+    },
+    cyber: {
+        '--bg': '#0a0f0f',
+        '--bg-secondary': '#1a1f1f',
+        '--bg-card': '#1f2a2a',
+        '--text': '#00ff88',
+        '--text-dim': '#00aa55',
+        '--border': '#00ff88',
+        name: 'Кибер'
+    }
+};
+
 // === ИНИЦИАЛИЗАЦИЯ ===
 document.addEventListener('DOMContentLoaded', () => {
     console.log('>> NEXUS OWNER EDITION INITIALIZED');
     initMatrixBackground();
     checkAuth();
+    
+    const urlParams = new URLSearchParams(window.location.search);
+    const postId = urlParams.get('post');
+    if (postId) {
+        setTimeout(() => {
+            openPostById(postId);
+        }, 1500);
+    }
 });
 
 function initMatrixBackground() {
@@ -104,9 +146,12 @@ window.checkAuth = async function() {
             }
             currentUser = user;
             localStorage.setItem('nexus_user', JSON.stringify(currentUser));
-            showMainScreen();
             
-            // Показываем приветствие для новых пользователей
+            // Загружаем настройки
+            await loadUserSettings();
+            
+            showMainScreen();
+            startNotifications();
             checkWelcomeModal();
         } else {
             showRegistration();
@@ -117,24 +162,361 @@ window.checkAuth = async function() {
     }
 };
 
+// === ЗАГРУЗКА НАСТРОЕК ===
+async function loadUserSettings() {
+    const { data: settings } = await _supabase
+        .from('user_settings')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .single();
+    
+    if (settings) {
+        userSettings = settings;
+        // Применяем тему
+        applyTheme(settings.theme || 'dark');
+    } else {
+        // Создаем настройки по умолчанию
+        const { data: newSettings } = await _supabase
+            .from('user_settings')
+            .insert([{
+                user_id: currentUser.id,
+                theme: 'dark',
+                notifications_enabled: true,
+                sound_enabled: true,
+                bio: '',
+                reactions_enabled: true
+            }])
+            .select()
+            .single();
+        
+        userSettings = newSettings;
+        applyTheme('dark');
+    }
+}
+
+// === ПРИМЕНЕНИЕ ТЕМЫ ===
+function applyTheme(themeName) {
+    const theme = themes[themeName] || themes.dark;
+    const root = document.documentElement;
+    
+    Object.keys(theme).forEach(key => {
+        if (key !== 'name') {
+            root.style.setProperty(key, theme[key]);
+        }
+    });
+    
+    localStorage.setItem('nexus_theme', themeName);
+}
+
+// === НАСТРОЙКИ ===
+window.openSettings = function() {
+    const modal = document.getElementById('settings-modal');
+    if (modal) {
+        modal.classList.add('active');
+        loadSettingsData();
+    }
+};
+
+window.closeSettings = function() {
+    const modal = document.getElementById('settings-modal');
+    if (modal) {
+        modal.classList.remove('active');
+    }
+};
+
+async function loadSettingsData() {
+    if (!userSettings) return;
+    
+    // Тема
+    const themeSelect = document.getElementById('settings-theme');
+    if (themeSelect) {
+        themeSelect.value = userSettings.theme || 'dark';
+    }
+    
+    // Уведомления
+    const notificationsCheck = document.getElementById('settings-notifications');
+    if (notificationsCheck) {
+        notificationsCheck.checked = userSettings.notifications_enabled;
+    }
+    
+    // Звуки
+    const soundCheck = document.getElementById('settings-sound');
+    if (soundCheck) {
+        soundCheck.checked = userSettings.sound_enabled;
+    }
+    
+    // Реакции
+    const reactionsCheck = document.getElementById('settings-reactions');
+    if (reactionsCheck) {
+        reactionsCheck.checked = userSettings.reactions_enabled;
+    }
+    
+    // Био
+    const bioInput = document.getElementById('settings-bio');
+    if (bioInput) {
+        bioInput.value = userSettings.bio || '';
+    }
+    
+    // Загружаем историю входов
+    loadLoginHistory();
+}
+
+window.saveSettings = async function() {
+    const theme = document.getElementById('settings-theme')?.value;
+    const notifications = document.getElementById('settings-notifications')?.checked;
+    const sound = document.getElementById('settings-sound')?.checked;
+    const reactions = document.getElementById('settings-reactions')?.checked;
+    const bio = document.getElementById('settings-bio')?.value.trim();
+    
+    const updates = {
+        theme: theme,
+        notifications_enabled: notifications,
+        sound_enabled: sound,
+        reactions_enabled: reactions,
+        bio: bio,
+        updated_at: new Date()
+    };
+    
+    const { error } = await _supabase
+        .from('user_settings')
+        .update(updates)
+        .eq('user_id', currentUser.id);
+    
+    if (!error) {
+        userSettings = { ...userSettings, ...updates };
+        applyTheme(theme);
+        alert('✅ Настройки сохранены');
+        closeSettings();
+    } else {
+        alert('❌ Ошибка: ' + error.message);
+    }
+};
+
+// === ИСТОРИЯ ВХОДОВ ===
+async function loadLoginHistory() {
+    const container = document.getElementById('login-history-list');
+    if (!container) return;
+    
+    container.innerHTML = '<div class="loading">>> ЗАГРУЗКА...</div>';
+    
+    const { data: history } = await _supabase
+        .from('login_history')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+    
+    container.innerHTML = '';
+    
+    if (!history || history.length === 0) {
+        container.innerHTML = '<div class="loading">>> ИСТОРИЯ ВХОДОВ ПУСТА</div>';
+        return;
+    }
+    
+    history.forEach(entry => {
+        const d = document.createElement('div');
+        d.className = 'login-history-item';
+        
+        const date = new Date(entry.created_at).toLocaleString('ru-RU', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+        
+        const device = entry.device_info || 'Неизвестное устройство';
+        const location = entry.location || 'Неизвестно';
+        const ip = entry.ip_address || 'IP скрыт';
+        
+        d.innerHTML = `
+            <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:1.5rem;">🕒</span>
+                <div style="flex:1;">
+                    <div><strong>${date}</strong></div>
+                    <div style="font-size:0.8rem; color:var(--text-dim);">${device}</div>
+                    <div style="font-size:0.7rem; color:var(--text-dim);">📍 ${location} | IP: ${ip}</div>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(d);
+    });
+}
+
+// === СОХРАНЕНИЕ ИСТОРИИ ВХОДА ===
+async function saveLoginHistory() {
+    try {
+        const userAgent = navigator.userAgent;
+        const deviceInfo = getDeviceInfo(userAgent);
+        
+        // Получаем IP (через бесплатный сервис)
+        const ipResponse = await fetch('https://api.ipify.org?format=json');
+        const ipData = await ipResponse.json();
+        
+        // Получаем локацию (примерно)
+        let location = 'Неизвестно';
+        try {
+            const geoResponse = await fetch(`https://ipapi.co/${ipData.ip}/json/`);
+            const geoData = await geoResponse.json();
+            location = `${geoData.city || ''}, ${geoData.country_name || ''}`.trim() || 'Неизвестно';
+        } catch (e) {
+            console.log('Geo error:', e);
+        }
+        
+        await _supabase
+            .from('login_history')
+            .insert([{
+                user_id: currentUser.id,
+                ip_address: ipData.ip,
+                user_agent: userAgent,
+                device_info: deviceInfo,
+                location: location
+            }]);
+            
+    } catch (err) {
+        console.error('Login history error:', err);
+    }
+}
+
+function getDeviceInfo(userAgent) {
+    if (userAgent.includes('Windows')) return 'Windows';
+    if (userAgent.includes('Mac')) return 'macOS';
+    if (userAgent.includes('iPhone')) return 'iPhone';
+    if (userAgent.includes('iPad')) return 'iPad';
+    if (userAgent.includes('Android')) return 'Android';
+    if (userAgent.includes('Linux')) return 'Linux';
+    return 'Неизвестное устройство';
+}
+
+// === РЕАКЦИИ НА ПОСТЫ ===
+window.toggleReaction = async function(postId, type) {
+    if (!userSettings?.reactions_enabled) {
+        alert('❌ Реакции отключены в настройках');
+        return;
+    }
+    
+    const btn = event.currentTarget;
+    const reactionsBar = btn.closest('.post-reactions');
+    
+    // Проверяем, есть ли уже реакция от пользователя
+    const { data: existing } = await _supabase
+        .from('post_reactions')
+        .select('*')
+        .eq('post_id', postId)
+        .eq('user_id', currentUser.id)
+        .single();
+    
+    if (existing) {
+        if (existing.reaction_type === type) {
+            // Убираем реакцию
+            await _supabase
+                .from('post_reactions')
+                .delete()
+                .eq('post_id', postId)
+                .eq('user_id', currentUser.id);
+        } else {
+            // Меняем реакцию
+            await _supabase
+                .from('post_reactions')
+                .update({ reaction_type: type })
+                .eq('post_id', postId)
+                .eq('user_id', currentUser.id);
+        }
+    } else {
+        // Добавляем новую реакцию
+        await _supabase
+            .from('post_reactions')
+            .insert([{
+                post_id: postId,
+                user_id: currentUser.id,
+                reaction_type: type
+            }]);
+    }
+    
+    // Обновляем отображение реакций
+    await loadPostReactions(postId, reactionsBar);
+};
+
+async function loadPostReactions(postId, container) {
+    const { data: reactions } = await _supabase
+        .from('post_reactions')
+        .select('reaction_type')
+        .eq('post_id', postId);
+    
+    if (!reactions) return;
+    
+    const counts = {
+        like: reactions.filter(r => r.reaction_type === 'like').length,
+        fire: reactions.filter(r => r.reaction_type === 'fire').length,
+        mindblown: reactions.filter(r => r.reaction_type === 'mindblown').length,
+        cry: reactions.filter(r => r.reaction_type === 'cry').length
+    };
+    
+    // Обновляем счетчики
+    if (container) {
+        container.querySelectorAll('.reaction-count').forEach(el => {
+            const type = el.dataset.reaction;
+            if (type && counts[type] !== undefined) {
+                el.textContent = counts[type];
+            }
+        });
+    }
+}
+
+// === БИН-КОД (2FA) ===
+let userBinCode = null;
+
+window.generateBinCode = function() {
+    // Генерируем 6-значный код из букв и цифр
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    
+    userBinCode = code;
+    
+    const display = document.getElementById('bin-code-display');
+    if (display) {
+        display.textContent = code;
+        display.style.display = 'block';
+    }
+    
+    alert(`🔐 Ваш БИН-код: ${code}\nСохраните его!`);
+};
+
+window.verifyBinCode = function() {
+    const input = document.getElementById('bin-code-input')?.value.trim().toUpperCase();
+    
+    if (!userBinCode) {
+        alert('❌ Сначала сгенерируйте код');
+        return false;
+    }
+    
+    if (input === userBinCode) {
+        alert('✅ Код верный!');
+        return true;
+    } else {
+        alert('❌ Неверный код');
+        return false;
+    }
+};
+
 // === ПРОВЕРКА И ПОКАЗ ПРИВЕТСТВИЯ ===
 async function checkWelcomeModal() {
     try {
-        // Проверяем, видел ли пользователь приветствие
         const { data: welcome } = await _supabase
             .from('user_welcome')
             .select('*')
             .eq('user_id', currentUser.id)
             .single();
         
-        // Если не видел или запись отсутствует
         if (!welcome || !welcome.welcomed) {
-            // Показываем модальное окно через 1 секунду
             setTimeout(() => {
                 showWelcomeModal();
             }, 1000);
             
-            // Отмечаем, что показали
             if (welcome) {
                 await _supabase
                     .from('user_welcome')
@@ -146,24 +528,23 @@ async function checkWelcomeModal() {
                     .insert([{ user_id: currentUser.id, welcomed: true }]);
             }
         }
+        
+        // Сохраняем историю входа
+        saveLoginHistory();
+        
     } catch (err) {
         console.error('Welcome check error:', err);
     }
 }
 
-// === ПОКАЗ ПРИВЕТСТВЕННОГО МОДАЛЬНОГО ОКНА ===
 window.showWelcomeModal = function() {
     const modal = document.getElementById('welcome-modal');
-    if (modal) {
-        modal.classList.add('active');
-    }
+    if (modal) modal.classList.add('active');
 };
 
 window.closeWelcomeModal = function() {
     const modal = document.getElementById('welcome-modal');
-    if (modal) {
-        modal.classList.remove('active');
-    }
+    if (modal) modal.classList.remove('active');
 };
 
 window.showRegistration = function() {
@@ -198,9 +579,7 @@ function showRegStep(step) {
     });
     
     const container = document.querySelector('.auth-screen');
-    if (container) {
-        container.scrollTop = 0;
-    }
+    if (container) container.scrollTop = 0;
 }
 
 window.registrationStep1 = async function() {
@@ -288,15 +667,26 @@ window.registrationStep3 = async function() {
         
         currentUser = user;
         localStorage.setItem('nexus_user', JSON.stringify(currentUser));
+        
+        // Создаем настройки по умолчанию
+        await _supabase
+            .from('user_settings')
+            .insert([{
+                user_id: user.id,
+                theme: 'dark',
+                notifications_enabled: true,
+                sound_enabled: true,
+                bio: '',
+                reactions_enabled: true
+            }]);
+        
         alert('✅ Добро пожаловать, ' + (isOwner ? 'OWNER!' : 'пользователь!'));
         showMainScreen();
         
-        // Показываем приветствие новому пользователю
         setTimeout(() => {
             showWelcomeModal();
         }, 1000);
         
-        // Создаем запись в user_welcome
         await _supabase
             .from('user_welcome')
             .insert([{ user_id: user.id, welcomed: true }]);
@@ -417,13 +807,16 @@ window.showMainScreen = function() {
     
     const adminNav = document.getElementById('admin-nav-item');
     const newsNav = document.getElementById('news-nav-item');
+    const settingsNav = document.getElementById('settings-nav-item');
     
     if (adminNav) {
         adminNav.style.display = isOwner(currentUser) ? 'flex' : 'none';
     }
-    
     if (newsNav) {
-        newsNav.style.display = 'flex'; // Новости видят все
+        newsNav.style.display = 'flex';
+    }
+    if (settingsNav) {
+        settingsNav.style.display = 'flex';
     }
     
     const emoji = document.getElementById('user-emoji');
@@ -469,6 +862,7 @@ window.switchTab = function(tab) {
     else if (tab === 'profile') showProfile(currentUser.id);
     else if (tab === 'admin') showAdminPanel();
     else if (tab === 'news') loadNews();
+    else if (tab === 'settings') openSettings();
 };
 
 // === ЗАГРУЗКА НОВОСТЕЙ ===
@@ -559,27 +953,20 @@ window.loadPosts = async function(feedType = 'all') {
         .select('post_id')
         .eq('user_id', currentUser.id);
         
-    const liked = likes?.map(l => l.post_id) || [];
+    const likedPosts = new Set(likes?.map(l => l.post_id) || []);
     
     let filteredPosts = posts;
     if (feedType === 'clan' && currentUser.clan) {
         filteredPosts = posts.filter(post => post.users?.clan === currentUser.clan);
     }
     
-    filteredPosts.forEach(post => {
-        const div = createPostElement(post, liked.includes(post.id));
+    for (const post of filteredPosts) {
+        const div = await createPostElement(post, likedPosts.has(post.id));
         feed.appendChild(div);
-    });
+    }
 };
 
-// === КНОПКИ ФИЛЬТРА ЛЕНТЫ ===
-window.toggleFeedFilter = function(type) {
-    document.querySelectorAll('.feed-filter-btn').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
-    loadPosts(type);
-};
-
-function createPostElement(post, isLiked) {
+async function createPostElement(post, isLiked) {
     const div = document.createElement('div');
     div.className = 'cyber-post';
     const u = post.users || {};
@@ -599,7 +986,10 @@ function createPostElement(post, isLiked) {
     if (post.has_drawing && post.drawing_data) {
         div.classList.add('has-drawing');
         content = '<div class="cyber-post-content">' + escapeHtml(post.content) + '</div>' +
-                 '<div class="cyber-photo-display"><img src="' + post.drawing_data + '"></div>';
+                 '<div class="cyber-photo-display">' +
+                 '<img src="' + post.drawing_data + '" onclick="openFullImage(\'' + post.drawing_data + '\')" style="cursor: pointer; transition: 0.3s;">' +
+                 '<div style="text-align: center; margin-top: 5px; font-size: 0.7rem; color: var(--cyan);">🔍 Нажмите на фото для просмотра</div>' +
+                 '</div>';
     } else if (post.audio_url) {
         content = '<div class="cyber-post-content">' + escapeHtml(post.content) + '</div>' +
                  '<div class="cyber-audio-message"><audio controls><source src="' + post.audio_url + '"></audio></div>';
@@ -616,14 +1006,59 @@ function createPostElement(post, isLiked) {
     
     const usernameDisplay = formatUsername(u, true);
     
+    let actionButtons = '';
+    if (u.id === currentUser?.id || isOwner(currentUser)) {
+        actionButtons = `
+            <button class="cyber-action-btn" onclick="editPost('${post.id}')" style="color:var(--cyan);" title="Редактировать">✏️</button>
+            <button class="cyber-action-btn" onclick="deletePost('${post.id}')" style="color:var(--red);" title="Удалить">🗑️</button>
+        `;
+    }
+    
+    // Получаем реакции
+    const { data: reactions } = await _supabase
+        .from('post_reactions')
+        .select('reaction_type')
+        .eq('post_id', post.id);
+    
+    const reactionCounts = {
+        like: reactions?.filter(r => r.reaction_type === 'like').length || 0,
+        fire: reactions?.filter(r => r.reaction_type === 'fire').length || 0,
+        mindblown: reactions?.filter(r => r.reaction_type === 'mindblown').length || 0,
+        cry: reactions?.filter(r => r.reaction_type === 'cry').length || 0
+    };
+    
+    const userReaction = reactions?.find(r => r.user_id === currentUser.id)?.reaction_type;
+    
+    // Блок реакций
+    const reactionsHtml = userSettings?.reactions_enabled ? `
+        <div class="post-reactions" style="display:flex; gap:5px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+            <button class="reaction-btn ${userReaction === 'like' ? 'active' : ''}" onclick="toggleReaction('${post.id}', 'like')">
+                ❤️ <span class="reaction-count" data-reaction="like">${reactionCounts.like}</span>
+            </button>
+            <button class="reaction-btn ${userReaction === 'fire' ? 'active' : ''}" onclick="toggleReaction('${post.id}', 'fire')">
+                🔥 <span class="reaction-count" data-reaction="fire">${reactionCounts.fire}</span>
+            </button>
+            <button class="reaction-btn ${userReaction === 'mindblown' ? 'active' : ''}" onclick="toggleReaction('${post.id}', 'mindblown')">
+                🤯 <span class="reaction-count" data-reaction="mindblown">${reactionCounts.mindblown}</span>
+            </button>
+            <button class="reaction-btn ${userReaction === 'cry' ? 'active' : ''}" onclick="toggleReaction('${post.id}', 'cry')">
+                😢 <span class="reaction-count" data-reaction="cry">${reactionCounts.cry}</span>
+            </button>
+        </div>
+    ` : '';
+    
     div.innerHTML = '<div class="cyber-post-header">' +
         '<div class="cyber-user-identity">' +
         avatarHtml +
         '<span class="cyber-username" onclick="showProfile(\'' + (post.user_id || '') + '\')">' + usernameDisplay + '</span>' +
         '</div>' +
+        '<div style="display:flex; gap:5px;">' +
         '<span class="cyber-post-time">' + time + '</span>' +
+        actionButtons +
+        '</div>' +
         '</div>' +
         content +
+        reactionsHtml +
         '<div class="cyber-post-actions">' +
         '<button class="cyber-action-btn like' + (isLiked ? ' liked' : '') + '" onclick="toggleLike(\'' + post.id + '\')">' +
         '<svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>' +
@@ -637,33 +1072,251 @@ function createPostElement(post, isLiked) {
         '<svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>' +
         '<span>' + (post.reposts_count || 0) + '</span>' +
         '</button>' +
+        '<button class="cyber-action-btn" onclick="copyPostLink(\'' + post.id + '\')" title="Копировать ссылку">🔗</button>' +
         '</div>';
     
     return div;
 }
 
+// === ОТКРЫТИЕ КАРТИНКИ ===
+window.openFullImage = function(imageUrl) {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'image-modal';
+    modal.style.alignItems = 'center';
+    modal.style.justifyContent = 'center';
+    modal.style.backgroundColor = 'rgba(0,0,0,0.95)';
+    
+    modal.innerHTML = `
+        <div style="position: relative; max-width: 90vw; max-height: 90vh;">
+            <img src="${imageUrl}" style="max-width: 100%; max-height: 90vh; border-radius: var(--radius-lg); border: 2px solid var(--green);">
+            <button onclick="this.closest('.modal').remove()" style="position: absolute; top: -40px; right: -40px; width: 40px; height: 40px; border-radius: 50%; background: var(--red); color: white; border: none; font-size: 1.5rem; cursor: pointer; display: flex; align-items: center; justify-content: center;">✕</button>
+            <button onclick="downloadImage('${imageUrl}')" style="position: absolute; bottom: -40px; right: -40px; width: 40px; height: 40px; border-radius: 50%; background: var(--green); color: black; border: none; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center;">⬇️</button>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+};
+
+window.downloadImage = async function(imageUrl) {
+    try {
+        const response = await fetch(imageUrl);
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'nexus-image-' + Date.now() + '.jpg';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+    } catch (err) {
+        alert('Не удалось скачать изображение');
+    }
+};
+
+// === РЕДАКТИРОВАНИЕ ПОСТА ===
+window.editPost = async function(postId) {
+    const { data: post } = await _supabase
+        .from('posts')
+        .select('*')
+        .eq('id', postId)
+        .single();
+    
+    if (!post) return;
+    
+    if (post.user_id !== currentUser.id && !isOwner(currentUser)) {
+        alert('❌ Нельзя редактировать чужой пост');
+        return;
+    }
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.id = 'edit-post-modal';
+    modal.innerHTML = `
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>>> РЕДАКТИРОВАТЬ ПОСТ</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                <textarea id="edit-post-content" rows="4" placeholder="Текст поста..." style="width:100%; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text);">${escapeHtml(post.content || '')}</textarea>
+                <button onclick="saveEditedPost('${postId}')" class="cyber-btn-primary" style="margin-top:15px;">>> СОХРАНИТЬ</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+};
+
+window.saveEditedPost = async function(postId) {
+    const content = document.getElementById('edit-post-content')?.value.trim();
+    if (!content) {
+        alert('Введите текст');
+        return;
+    }
+    
+    const { error } = await _supabase
+        .from('posts')
+        .update({ content: content })
+        .eq('id', postId);
+    
+    if (error) {
+        alert('Ошибка: ' + error.message);
+        return;
+    }
+    
+    document.getElementById('edit-post-modal')?.remove();
+    alert('✅ Пост обновлен');
+    loadPosts(currentFeed);
+};
+
+// === УДАЛЕНИЕ ПОСТА - ИСПРАВЛЕНО ===
+window.deletePost = async function(postId) {
+    const { data: post, error: fetchError } = await _supabase
+        .from('posts')
+        .select('user_id')
+        .eq('id', postId)
+        .single();
+    
+    if (fetchError || !post) {
+        alert('❌ Пост не найден');
+        return;
+    }
+    
+    if (post.user_id !== currentUser.id && !isOwner(currentUser)) {
+        alert('❌ Нельзя удалить чужой пост');
+        return;
+    }
+    
+    if (!confirm('🚨 ТОЧНО УДАЛИТЬ ПОСТ? Это действие нельзя отменить!')) return;
+    
+    try {
+        await _supabase.from('likes').delete().eq('post_id', postId);
+        await _supabase.from('comments').delete().eq('post_id', postId);
+        await _supabase.from('reposts').delete().eq('post_id', postId);
+        await _supabase.from('post_reactions').delete().eq('post_id', postId);
+        
+        const { error } = await _supabase
+            .from('posts')
+            .delete()
+            .eq('id', postId);
+        
+        if (error) {
+            alert('❌ Ошибка при удалении: ' + error.message);
+            return;
+        }
+        
+        alert('✅ Пост успешно удален из базы данных');
+        await loadPosts(currentFeed);
+        
+    } catch (err) {
+        console.error('Delete error:', err);
+        alert('❌ Критическая ошибка при удалении');
+    }
+};
+
+// === КОПИРОВАТЬ ССЫЛКУ ===
+window.copyPostLink = function(postId) {
+    const link = `${window.location.origin}${window.location.pathname}?post=${postId}`;
+    
+    navigator.clipboard.writeText(link).then(() => {
+        alert('✅ Ссылка скопирована!');
+    }).catch(() => {
+        const modal = document.createElement('div');
+        modal.className = 'modal active';
+        modal.innerHTML = `
+            <div class="cyber-modal-content">
+                <div class="cyber-modal-header">
+                    <h3>>> ССЫЛКА НА ПОСТ</h3>
+                    <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+                </div>
+                <div class="cyber-modal-body">
+                    <p>Скопируйте ссылку:</p>
+                    <input type="text" value="${link}" readonly style="width:100%; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); margin:10px 0;">
+                    <button onclick="this.previousElementSibling.select(); document.execCommand('copy'); alert('Скопировано!')" class="cyber-btn-primary">>> КОПИРОВАТЬ</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    });
+};
+
+// === ОТКРЫТИЕ ПОСТА ПО ССЫЛКЕ ===
+window.openPostById = async function(postId) {
+    const { data: post } = await _supabase
+        .from('posts')
+        .select('*, users:user_id(username, avatar_preset, avatar_url, emoji, clan, email, is_owner, role)')
+        .eq('id', postId)
+        .single();
+    
+    if (!post) {
+        alert('Пост не найден');
+        return;
+    }
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content" style="max-width:600px;">
+            <div class="cyber-modal-header">
+                <h3>>> ПРОСМОТР ПОСТА</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                ${(await createPostElement(post, false)).outerHTML}
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+};
+
 // === ЛАЙКИ ===
-window.toggleLike = async function(id) {
+window.toggleLike = async function(postId) {
     const btn = event.currentTarget;
     const span = btn.querySelector('span');
     const liked = btn.classList.contains('liked');
     
-    if (liked) {
-        await _supabase
-            .from('likes')
-            .delete()
-            .eq('post_id', id)
-            .eq('user_id', currentUser.id);
-            
-        btn.classList.remove('liked');
-        span.textContent = parseInt(span.textContent) - 1;
-    } else {
-        await _supabase
-            .from('likes')
-            .insert([{ post_id: id, user_id: currentUser.id }]);
-            
-        btn.classList.add('liked');
-        span.textContent = parseInt(span.textContent) + 1;
+    try {
+        if (liked) {
+            const { error } = await _supabase
+                .from('likes')
+                .delete()
+                .eq('post_id', postId)
+                .eq('user_id', currentUser.id);
+                
+            if (!error) {
+                btn.classList.remove('liked');
+                span.textContent = parseInt(span.textContent) - 1;
+            }
+        } else {
+            const { error } = await _supabase
+                .from('likes')
+                .insert([{ post_id: postId, user_id: currentUser.id }]);
+                
+            if (!error) {
+                btn.classList.add('liked');
+                span.textContent = parseInt(span.textContent) + 1;
+                
+                const { data: post } = await _supabase
+                    .from('posts')
+                    .select('user_id')
+                    .eq('id', postId)
+                    .single();
+                    
+                if (post && post.user_id !== currentUser.id && userSettings?.notifications_enabled) {
+                    await _supabase
+                        .from('notifications')
+                        .insert([{
+                            user_id: post.user_id,
+                            type: 'like',
+                            from_user_id: currentUser.id,
+                            post_id: postId
+                        }]);
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Like error:', err);
     }
 };
 
@@ -840,7 +1493,9 @@ window.showProfile = async function(userId) {
         if (cnt) cnt.textContent = posts?.length || 0;
         
         if (posts && posts.length > 0) {
-            posts.forEach(p => feed.appendChild(createPostElement(p, false)));
+            for (const p of posts) {
+                feed.appendChild(await createPostElement(p, false));
+            }
         } else {
             feed.innerHTML = '<div class="cyber-post">>> НЕТ ПОСТОВ</div>';
         }
@@ -1160,19 +1815,21 @@ window.saveProfileChanges = async function() {
 // === ЧАТ КЛАНА ===
 window.loadClanChat = async function() {
     const c = document.getElementById('clan-chat-messages');
-    const name = document.getElementById('clan-chat-name');
-    const icon = document.getElementById('clan-chat-icon');
-    const mem = document.getElementById('clan-chat-members');
+    if (!c) return;
     
     if (!currentUser.clan) { 
-        c.innerHTML = '<div class="loading">>> НЕ В КЛАНЕ</div>'; 
+        c.innerHTML = '<div class="loading">>> ВЫ НЕ СОСТОИТЕ В КЛАНЕ</div>'; 
         return; 
     }
     
+    c.innerHTML = '<div class="loading">>> ЗАГРУЗКА...</div>';
+    
     const cd = clans.find(x => x.name === currentUser.clan);
-    if (cd) { 
-        if (name) name.textContent = 'Чат: ' + cd.name; 
-        if (icon) icon.textContent = cd.icon; 
+    if (cd) {
+        const nameEl = document.getElementById('clan-chat-name');
+        const iconEl = document.getElementById('clan-chat-icon');
+        if (nameEl) nameEl.textContent = cd.name;
+        if (iconEl) iconEl.textContent = cd.icon;
     }
     
     const { data: msgs, error } = await _supabase
@@ -1187,29 +1844,43 @@ window.loadClanChat = async function() {
         return; 
     }
     
+    c.innerHTML = '';
+    
     if (!msgs || msgs.length === 0) { 
         c.innerHTML = '<div class="loading">>> НЕТ СООБЩЕНИЙ</div>'; 
     } else {
-        c.innerHTML = '';
         msgs.reverse().forEach(m => {
             const d = document.createElement('div');
-            d.className = 'cyber-chat-message';
+            d.className = 'clan-message';
             
-            let av = m.users?.avatar_url 
-                ? '<img src="' + m.users.avatar_url + '" style="width:100%;height:100%;border-radius:50%;">' 
-                : (m.users?.emoji || m.users?.avatar_preset || '👤');
-                
-            const avatarHtml = '<div class="cyber-chat-avatar">' + 
-                (isOwner(m.users) ? '<span class="owner-badge">✓</span>' : '') + 
-                av + '</div>';
+            let av = '';
+            if (m.users?.avatar_url) {
+                av = '<img src="' + m.users.avatar_url + '" style="width:40px;height:40px;border-radius:50%;object-fit:cover;">';
+            } else {
+                av = '<span style="font-size:1.8rem;">' + (m.users?.emoji || m.users?.avatar_preset || '👤') + '</span>';
+            }
             
-            d.innerHTML = avatarHtml +
-                '<div class="cyber-chat-content">' +
-                '<div class="cyber-chat-user">' + formatUsername(m.users, true) + '</div>' +
-                '<div class="cyber-chat-text">' + escapeHtml(m.message) + '</div>' +
-                '<div class="cyber-chat-time">' + new Date(m.created_at).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + '</div>' +
-                '</div>';
-                
+            const time = new Date(m.created_at).toLocaleTimeString('ru-RU', { 
+                hour: '2-digit', 
+                minute: '2-digit' 
+            });
+            
+            d.innerHTML = `
+                <div style="display:flex; gap:10px;">
+                    <div style="position:relative;">
+                        ${av}
+                        ${isOwner(m.users) ? '<span class="owner-badge-small" style="position:absolute; bottom:-2px; right:-2px;">✓</span>' : ''}
+                    </div>
+                    <div style="flex:1;">
+                        <div style="display:flex; justify-content:space-between;">
+                            <strong style="color:${isOwner(m.users) ? '#ff0000' : 'var(--green)'};">${m.users?.username || 'Unknown'}</strong>
+                            <span style="color:var(--text-dim); font-size:0.7rem;">${time}</span>
+                        </div>
+                        <div style="margin-top:4px;">${escapeHtml(m.message)}</div>
+                    </div>
+                </div>
+            `;
+            
             c.appendChild(d);
         });
         c.scrollTop = c.scrollHeight;
@@ -1219,13 +1890,14 @@ window.loadClanChat = async function() {
         .from('users')
         .select('*', { count: 'exact', head: true })
         .eq('clan', currentUser.clan);
-        
-    if (mem) mem.textContent = (count || 0) + ' участников';
+    
+    const memEl = document.getElementById('clan-chat-members');
+    if (memEl) memEl.textContent = (count || 0) + ' участников';
 };
 
 window.sendClanMessage = async function() {
-    const i = document.getElementById('clan-chat-message');
-    const msg = i?.value.trim();
+    const input = document.getElementById('clan-chat-input');
+    const msg = input?.value.trim();
     
     if (!msg || !currentUser.clan) return;
     
@@ -1242,11 +1914,332 @@ window.sendClanMessage = async function() {
         return; 
     }
     
-    if (i) i.value = '';
+    if (input) input.value = '';
     loadClanChat();
 };
 
-// === АДМИН ПАНЕЛЬ - С ВОЗМОЖНОСТЬЮ ДОБАВЛЯТЬ НОВОСТИ ===
+// === УВЕДОМЛЕНИЯ ===
+function startNotifications() {
+    if (notificationsInterval) clearInterval(notificationsInterval);
+    
+    notificationsInterval = setInterval(async () => {
+        if (userSettings?.notifications_enabled) {
+            await loadNotifications();
+        }
+    }, 10000);
+    
+    if (userSettings?.notifications_enabled) {
+        loadNotifications();
+    }
+}
+
+async function loadNotifications() {
+    if (!currentUser || !userSettings?.notifications_enabled) return;
+    
+    const { data: notifications } = await _supabase
+        .from('notifications')
+        .select('*, from_user:from_user_id(username, emoji, avatar_url, is_owner), post:post_id(content)')
+        .eq('user_id', currentUser.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+    
+    if (notifications && notifications.length > 0) {
+        updateNotificationBadge(notifications.filter(n => !n.is_read).length);
+        displayNotifications(notifications);
+    }
+}
+
+function updateNotificationBadge(count) {
+    const badge = document.getElementById('notification-badge');
+    if (badge) {
+        if (count > 0) {
+            badge.textContent = count > 9 ? '9+' : count;
+            badge.style.display = 'flex';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+}
+
+function displayNotifications(notifications) {
+    const container = document.getElementById('notifications-list');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    if (notifications.length === 0) {
+        container.innerHTML = '<div class="loading">>> НЕТ УВЕДОМЛЕНИЙ</div>';
+        return;
+    }
+    
+    notifications.forEach(n => {
+        const d = document.createElement('div');
+        d.className = 'notification-item' + (n.is_read ? '' : ' unread');
+        d.onclick = () => markNotificationAsRead(n.id);
+        
+        let icon = '🔔';
+        let text = '';
+        
+        switch(n.type) {
+            case 'like':
+                icon = '❤️';
+                text = 'лайкнул(а) ваш пост';
+                break;
+            case 'comment':
+                icon = '💬';
+                text = 'оставил(а) комментарий';
+                break;
+            case 'repost':
+                icon = '🔄';
+                text = 'репостнул(а) ваш пост';
+                break;
+            case 'message':
+                icon = '✉️';
+                text = 'написал(а) вам';
+                break;
+        }
+        
+        const fromName = n.from_user ? (isOwner(n.from_user) ? '[owner] ' + n.from_user.username : n.from_user.username) : 'Кто-то';
+        
+        d.innerHTML = `
+            <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:1.5rem;">${icon}</span>
+                <div>
+                    <div><strong>${fromName}</strong> ${text}</div>
+                    <small style="color:var(--text-dim);">${new Date(n.created_at).toLocaleString('ru-RU')}</small>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(d);
+    });
+}
+
+async function markNotificationAsRead(id) {
+    await _supabase
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('id', id);
+    
+    loadNotifications();
+}
+
+window.openNotifications = function() {
+    const modal = document.getElementById('notifications-modal');
+    if (modal) {
+        modal.classList.add('active');
+        loadNotifications();
+    }
+};
+
+window.closeNotifications = function() {
+    const modal = document.getElementById('notifications-modal');
+    if (modal) {
+        modal.classList.remove('active');
+    }
+};
+
+// === ЛИЧНЫЕ СООБЩЕНИЯ ===
+window.openPrivateMessages = function() {
+    const modal = document.getElementById('private-messages-modal');
+    if (modal) {
+        modal.classList.add('active');
+        loadPrivateChats();
+    }
+};
+
+window.closePrivateMessages = function() {
+    const modal = document.getElementById('private-messages-modal');
+    if (modal) {
+        modal.classList.remove('active');
+    }
+};
+
+async function loadPrivateChats() {
+    const list = document.getElementById('private-chats-list');
+    if (!list) return;
+    
+    list.innerHTML = '<div class="loading">>> ЗАГРУЗКА...</div>';
+    
+    const { data: messages } = await _supabase
+        .from('private_messages')
+        .select('*, sender:sender_id(*), receiver:receiver_id(*)')
+        .or(`sender_id.eq.${currentUser.id},receiver_id.eq.${currentUser.id}`)
+        .order('created_at', { ascending: false });
+    
+    const chats = new Map();
+    
+    messages?.forEach(msg => {
+        const otherUser = msg.sender_id === currentUser.id ? msg.receiver : msg.sender;
+        if (!chats.has(otherUser.id)) {
+            chats.set(otherUser.id, {
+                user: otherUser,
+                lastMessage: msg,
+                unread: !msg.is_read && msg.receiver_id === currentUser.id
+            });
+        }
+    });
+    
+    list.innerHTML = '';
+    
+    if (chats.size === 0) {
+        list.innerHTML = '<div class="loading">>> НЕТ ЧАТОВ</div>';
+        return;
+    }
+    
+    Array.from(chats.values()).forEach(chat => {
+        const d = document.createElement('div');
+        d.className = 'private-chat-item' + (chat.unread ? ' unread' : '');
+        d.onclick = () => openPrivateChat(chat.user);
+        
+        let av = '';
+        if (chat.user.avatar_url) {
+            av = '<img src="' + chat.user.avatar_url + '" style="width:40px;height:40px;border-radius:50%;object-fit:cover;">';
+        } else {
+            av = '<span style="font-size:2rem;">' + (chat.user.emoji || '👤') + '</span>';
+        }
+        
+        d.innerHTML = `
+            <div style="display:flex; align-items:center; gap:10px;">
+                <div style="position:relative;">
+                    ${av}
+                    ${isOwner(chat.user) ? '<span class="owner-badge-small" style="position:absolute; bottom:-2px; right:-2px;">✓</span>' : ''}
+                </div>
+                <div style="flex:1;">
+                    <div><strong>${isOwner(chat.user) ? '[owner] ' + chat.user.username : '@' + chat.user.username}</strong></div>
+                    <div style="font-size:0.8rem; color:var(--text-dim);">${escapeHtml(chat.lastMessage.content.substring(0, 30))}${chat.lastMessage.content.length > 30 ? '...' : ''}</div>
+                </div>
+                <div style="font-size:0.7rem; color:var(--text-dim);">${new Date(chat.lastMessage.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
+            </div>
+        `;
+        
+        list.appendChild(d);
+    });
+}
+
+async function openPrivateChat(user) {
+    currentChatUser = user;
+    
+    const header = document.getElementById('private-chat-header');
+    const messages = document.getElementById('private-chat-messages');
+    const input = document.getElementById('private-chat-input-container');
+    
+    if (header) {
+        let av = '';
+        if (user.avatar_url) {
+            av = '<img src="' + user.avatar_url + '" style="width:40px;height:40px;border-radius:50%;object-fit:cover;">';
+        } else {
+            av = '<span style="font-size:2rem;">' + (user.emoji || '👤') + '</span>';
+        }
+        
+        header.innerHTML = `
+            <div style="display:flex; align-items:center; gap:10px; padding:10px;">
+                <button onclick="closePrivateChat()" style="background:none; border:none; color:var(--green); font-size:1.5rem; cursor:pointer;">←</button>
+                <div style="position:relative;">
+                    ${av}
+                    ${isOwner(user) ? '<span class="owner-badge-small" style="position:absolute; bottom:-2px; right:-2px;">✓</span>' : ''}
+                </div>
+                <div>
+                    <div><strong>${isOwner(user) ? '[owner] ' + user.username : '@' + user.username}</strong></div>
+                </div>
+            </div>
+        `;
+    }
+    
+    if (messages) messages.classList.remove('hidden');
+    if (input) input.classList.remove('hidden');
+    
+    await loadPrivateMessages(user.id);
+}
+
+function closePrivateChat() {
+    currentChatUser = null;
+    
+    const header = document.getElementById('private-chat-header');
+    const messages = document.getElementById('private-chat-messages');
+    const input = document.getElementById('private-chat-input-container');
+    
+    if (header) header.innerHTML = '';
+    if (messages) messages.classList.add('hidden');
+    if (input) input.classList.add('hidden');
+    
+    loadPrivateChats();
+}
+
+async function loadPrivateMessages(userId) {
+    const container = document.getElementById('private-chat-messages');
+    if (!container) return;
+    
+    container.innerHTML = '<div class="loading">>> ЗАГРУЗКА...</div>';
+    
+    const { data: messages } = await _supabase
+        .from('private_messages')
+        .select('*')
+        .or(`and(sender_id.eq.${currentUser.id},receiver_id.eq.${userId}),and(sender_id.eq.${userId},receiver_id.eq.${currentUser.id})`)
+        .order('created_at', { ascending: true });
+    
+    container.innerHTML = '';
+    
+    if (!messages || messages.length === 0) {
+        container.innerHTML = '<div class="loading">>> НЕТ СООБЩЕНИЙ</div>';
+        return;
+    }
+    
+    messages.forEach(msg => {
+        const d = document.createElement('div');
+        d.className = 'private-message ' + (msg.sender_id === currentUser.id ? 'outgoing' : 'incoming');
+        
+        d.innerHTML = `
+            <div class="message-content">${escapeHtml(msg.content)}</div>
+            <div class="message-time">${new Date(msg.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
+        `;
+        
+        container.appendChild(d);
+    });
+    
+    container.scrollTop = container.scrollHeight;
+    
+    await _supabase
+        .from('private_messages')
+        .update({ is_read: true })
+        .eq('receiver_id', currentUser.id)
+        .eq('sender_id', userId)
+        .eq('is_read', false);
+}
+
+window.sendPrivateMessage = async function() {
+    const input = document.getElementById('private-message-input');
+    const content = input?.value.trim();
+    
+    if (!content || !currentChatUser) return;
+    
+    const { error } = await _supabase
+        .from('private_messages')
+        .insert([{
+            sender_id: currentUser.id,
+            receiver_id: currentChatUser.id,
+            content: content,
+            is_read: false
+        }]);
+    
+    if (!error) {
+        input.value = '';
+        await loadPrivateMessages(currentChatUser.id);
+        
+        if (userSettings?.notifications_enabled) {
+            await _supabase
+                .from('notifications')
+                .insert([{
+                    user_id: currentChatUser.id,
+                    type: 'message',
+                    from_user_id: currentUser.id,
+                    content: content.substring(0, 50)
+                }]);
+        }
+    }
+};
+
+// === АДМИН ПАНЕЛЬ ===
 window.showAdminPanel = async function() {
     if (!isOwner(currentUser)) { 
         alert('❌ ЗАПРЕЩЕНО. Только для OWNER'); 
@@ -1308,11 +2301,9 @@ window.showAdminPanel = async function() {
         });
     }
     
-    // Загружаем список новостей для админа
     loadAdminNews();
 };
 
-// === ЗАГРУЗКА НОВОСТЕЙ ДЛЯ АДМИНА ===
 async function loadAdminNews() {
     const container = document.getElementById('admin-news-list');
     if (!container) return;
@@ -1335,18 +2326,15 @@ async function loadAdminNews() {
         d.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;">' +
             '<div><strong>' + escapeHtml(item.title) + '</strong><br>' +
             '<small>' + new Date(item.created_at).toLocaleDateString('ru-RU') + '</small></div>' +
-            '<button onclick="deleteNews(\'' + item.id + '\')" style="background:var(--red);color:white;border:none;border-radius:50%;width:30px;height:30px;">✕</button>' +
+            '<button onclick="deleteNews(\'' + item.id + '\')" style="background:var(--red);color:white;border:none;border-radius:50%;width:30px;height:30px;cursor:pointer;">✕</button>' +
             '</div>';
         container.appendChild(d);
     });
 }
 
-// === СОЗДАНИЕ НОВОСТИ (ДЛЯ OWNER) ===
 window.openNewsModal = function() {
     const modal = document.getElementById('news-modal');
-    if (modal) {
-        modal.classList.add('active');
-    }
+    if (modal) modal.classList.add('active');
 };
 
 window.closeNewsModal = function() {
@@ -1384,7 +2372,7 @@ window.createNews = async function() {
     alert('✅ Новость опубликована!');
     closeNewsModal();
     loadAdminNews();
-    loadNews(); // Обновляем ленту новостей
+    loadNews();
 };
 
 window.deleteNews = async function(id) {
@@ -1437,9 +2425,8 @@ window.performLogin = async function() {
     
     currentUser = user;
     localStorage.setItem('nexus_user', JSON.stringify(currentUser));
+    await loadUserSettings();
     showMainScreen();
-    
-    // Показываем приветствие
     checkWelcomeModal();
 };
 
@@ -1451,5 +2438,670 @@ function startClanChatAutoRefresh() {
         if (t && !t.classList.contains('hidden')) loadClanChat();
     }, 5000);
 }
+// === ПРОВЕРКА БАНА ===
+async function checkUserBan(userId) {
+    const { data: ban } = await _supabase
+        .from('user_bans')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+    
+    if (ban) {
+        const now = new Date();
+        const banUntil = new Date(ban.ban_until);
+        
+        if (banUntil > now) {
+            return {
+                isBanned: true,
+                until: banUntil,
+                reason: ban.reason,
+                bannedBy: ban.banned_by
+            };
+        } else {
+            await _supabase
+                .from('user_bans')
+                .delete()
+                .eq('user_id', userId);
+        }
+    }
+    
+    return { isBanned: false };
+}
 
+// === ПОЛУЧЕНИЕ МЕДАЛЕК ПОЛЬЗОВАТЕЛЯ ===
+async function getUserMedals(userId) {
+    const { data: userMedals } = await _supabase
+        .from('user_medals')
+        .select('*, medals(*), awarded_by:users!user_medals_awarded_by_fkey(username)')
+        .eq('user_id', userId);
+    
+    return userMedals || [];
+}
+
+// === ОТОБРАЖЕНИЕ МЕДАЛЕК В ПРОФИЛЕ ===
+async function displayUserMedals(userId, container) {
+    const medals = await getUserMedals(userId);
+    
+    container.innerHTML = '';
+    
+    if (medals.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-dim); font-size:0.8rem;">Нет медалек</div>';
+        return;
+    }
+    
+    medals.forEach(item => {
+        const medal = item.medals;
+        const medalDiv = document.createElement('div');
+        medalDiv.className = 'medal-item';
+        medalDiv.setAttribute('data-medal-id', medal.id);
+        medalDiv.setAttribute('data-medal-name', medal.name);
+        medalDiv.setAttribute('data-medal-desc', medal.description);
+        medalDiv.setAttribute('data-medal-awarded', new Date(item.awarded_at).toLocaleDateString('ru-RU'));
+        medalDiv.setAttribute('data-medal-awarded-by', item.awarded_by?.username || 'OWNER');
+        
+        medalDiv.onclick = () => showMedalInfo(medalDiv);
+        
+        medalDiv.innerHTML = `
+            <div style="width:50px; height:50px; cursor:pointer; transition:transform 0.2s;" 
+                 onmouseover="this.style.transform='scale(1.1)'" 
+                 onmouseout="this.style.transform='scale(1)'">
+                ${medal.icon_svg}
+            </div>
+        `;
+        
+        container.appendChild(medalDiv);
+    });
+}
+
+// === ПОКАЗ ИНФОРМАЦИИ О МЕДАЛЬКЕ ===
+window.showMedalInfo = function(medalElement) {
+    const name = medalElement.getAttribute('data-medal-name');
+    const desc = medalElement.getAttribute('data-medal-desc');
+    const awarded = medalElement.getAttribute('data-medal-awarded');
+    const awardedBy = medalElement.getAttribute('data-medal-awarded-by');
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content" style="max-width:400px;">
+            <div class="cyber-modal-header">
+                <h3>>> ${name}</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body" style="text-align:center;">
+                <div style="width:100px; height:100px; margin:20px auto;">
+                    ${medalElement.querySelector('svg')?.outerHTML || ''}
+                </div>
+                <p style="margin:20px 0; color:var(--text-dim);">${desc}</p>
+                <p style="font-size:0.8rem;">Выдана: ${awarded}</p>
+                <p style="font-size:0.8rem; color:var(--green);">Кем: ${awardedBy}</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+};
+
+// === КНОПКИ ДЛЯ OWNER В ПРОФИЛЕ ===
+async function addOwnerButtonsToProfile(profileUser) {
+    const container = document.getElementById('profile-owner-actions');
+    if (!container) return;
+    
+    if (!isOwner(currentUser)) {
+        container.style.display = 'none';
+        return;
+    }
+    
+    container.style.display = 'block';
+    container.innerHTML = '';
+    
+    const { data: availableMedals } = await _supabase
+        .from('medals')
+        .select('*')
+        .order('name');
+    
+    const medalBtn = document.createElement('button');
+    medalBtn.className = 'cyber-btn-outline';
+    medalBtn.style.margin = '5px';
+    medalBtn.style.background = 'var(--green-dim)';
+    medalBtn.innerHTML = '🏅 Дать медальку';
+    medalBtn.onclick = () => showAwardMedalModal(profileUser.id, availableMedals);
+    container.appendChild(medalBtn);
+    
+    const verifyBtn = document.createElement('button');
+    verifyBtn.className = 'cyber-btn-outline';
+    verifyBtn.style.margin = '5px';
+    verifyBtn.style.background = '#4169E1';
+    verifyBtn.style.color = 'white';
+    verifyBtn.innerHTML = '✓ Дать галочку';
+    verifyBtn.onclick = () => toggleUserVerification(profileUser.id, !profileUser.is_verified);
+    container.appendChild(verifyBtn);
+    
+    const banStatus = await checkUserBan(profileUser.id);
+    
+    const banBtn = document.createElement('button');
+    banBtn.className = 'cyber-btn-outline';
+    banBtn.style.margin = '5px';
+    
+    if (banStatus.isBanned) {
+        banBtn.style.background = 'var(--red)';
+        banBtn.style.color = 'white';
+        banBtn.innerHTML = '🔴 Снять бан';
+        banBtn.onclick = () => removeUserBan(profileUser.id);
+    } else {
+        banBtn.style.background = '#ff9800';
+        banBtn.style.color = 'white';
+        banBtn.innerHTML = '⛔ Забанить';
+        banBtn.onclick = () => showBanModal(profileUser.id);
+    }
+    container.appendChild(banBtn);
+}
+
+// === МОДАЛКА ВЫДАЧИ МЕДАЛЬКИ ===
+function showAwardMedalModal(userId, availableMedals) {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>>> ВЫДАТЬ МЕДАЛЬКУ</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:10px; max-height:400px; overflow-y:auto;">
+                    ${availableMedals.map(medal => `
+                        <div onclick="awardMedalToUser('${userId}', '${medal.id}')" 
+                             style="padding:15px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-md); cursor:pointer; text-align:center; transition:0.2s;"
+                             onmouseover="this.style.borderColor='var(--green)'"
+                             onmouseout="this.style.borderColor='var(--border)'">
+                            <div style="width:60px; height:60px; margin:0 auto 10px;">
+                                ${medal.icon_svg}
+                            </div>
+                            <div style="font-weight:600;">${medal.name}</div>
+                            <div style="font-size:0.7rem; color:var(--text-dim);">${medal.description}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// === ВЫДАТЬ МЕДАЛЬКУ ===
+window.awardMedalToUser = async function(userId, medalId) {
+    const { error } = await _supabase
+        .from('user_medals')
+        .insert([{
+            user_id: userId,
+            medal_id: medalId,
+            awarded_by: currentUser.id
+        }]);
+    
+    if (error) {
+        if (error.code === '23505') {
+            alert('❌ У пользователя уже есть эта медалька');
+        } else {
+            alert('❌ Ошибка: ' + error.message);
+        }
+        return;
+    }
+    
+    alert('✅ Медалька выдана!');
+    document.querySelector('.modal.active')?.remove();
+    
+    const medalsContainer = document.getElementById('profile-medals');
+    if (medalsContainer) {
+        await displayUserMedals(userId, medalsContainer);
+    }
+};
+
+// === ПЕРЕКЛЮЧЕНИЕ ГАЛОЧКИ ===
+window.toggleUserVerification = async function(userId, verified) {
+    const { error } = await _supabase
+        .from('users')
+        .update({ is_verified: verified })
+        .eq('id', userId);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert(verified ? '✅ Галочка выдана!' : '✅ Галочка убрана!');
+    
+    const user = currentProfileUser;
+    if (user && user.id === userId) {
+        user.is_verified = verified;
+        const usernameEl = document.getElementById('profile-username');
+        if (usernameEl) {
+            if (isOwner(user)) {
+                usernameEl.innerHTML = '<span class="owner-username-large">✓ [owner] ' + user.username + '</span>';
+            } else if (verified) {
+                usernameEl.innerHTML = '<span style="color:var(--cyan);">✓ ' + user.username + '</span>';
+            } else {
+                usernameEl.textContent = '@' + user.username;
+            }
+        }
+    }
+};
+
+// === МОДАЛКА БАНА ===
+function showBanModal(userId) {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>>> ЗАБАНИТЬ ПОЛЬЗОВАТЕЛЯ</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                <label class="cyber-label">Причина бана:</label>
+                <input type="text" id="ban-reason" placeholder="Нарушение правил..." style="width:100%; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); border-radius:var(--radius-md); margin-bottom:15px;">
+                
+                <label class="cyber-label">Длительность:</label>
+                <select id="ban-duration" style="width:100%; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); border-radius:var(--radius-md); margin-bottom:20px;">
+                    <option value="1">1 час</option>
+                    <option value="3">3 часа</option>
+                    <option value="6">6 часов</option>
+                    <option value="12">12 часов</option>
+                    <option value="24">24 часа</option>
+                    <option value="72">3 дня</option>
+                    <option value="168">7 дней</option>
+                    <option value="720">30 дней</option>
+                </select>
+                
+                <button onclick="banUser('${userId}')" class="cyber-btn-primary" style="background:var(--red);">>> ЗАБАНИТЬ</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// === ЗАБАНИТЬ ПОЛЬЗОВАТЕЛЯ ===
+window.banUser = async function(userId) {
+    const reason = document.getElementById('ban-reason')?.value.trim() || 'Нарушение правил';
+    const duration = parseInt(document.getElementById('ban-duration')?.value || '24');
+    
+    const banUntil = new Date();
+    banUntil.setHours(banUntil.getHours() + duration);
+    
+    await _supabase
+        .from('user_bans')
+        .delete()
+        .eq('user_id', userId);
+    
+    const { error } = await _supabase
+        .from('user_bans')
+        .insert([{
+            user_id: userId,
+            banned_by: currentUser.id,
+            ban_until: banUntil,
+            reason: reason
+        }]);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert(`✅ Пользователь забанен до ${banUntil.toLocaleString('ru-RU')}`);
+    document.querySelector('.modal.active')?.remove();
+    
+    if (currentProfileUser && currentProfileUser.id === userId) {
+        showProfile(userId);
+    }
+};
+
+// === СНЯТЬ БАН ===
+window.removeUserBan = async function(userId) {
+    const { error } = await _supabase
+        .from('user_bans')
+        .delete()
+        .eq('user_id', userId);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert('✅ Бан снят');
+    
+    if (currentProfileUser && currentProfileUser.id === userId) {
+        showProfile(userId);
+    }
+};
+// === ПРОВЕРКА БАНА ===
+async function checkUserBan(userId) {
+    const { data: ban } = await _supabase
+        .from('user_bans')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+    
+    if (ban) {
+        const now = new Date();
+        const banUntil = new Date(ban.ban_until);
+        
+        if (banUntil > now) {
+            return {
+                isBanned: true,
+                until: banUntil,
+                reason: ban.reason,
+                bannedBy: ban.banned_by
+            };
+        } else {
+            await _supabase
+                .from('user_bans')
+                .delete()
+                .eq('user_id', userId);
+        }
+    }
+    
+    return { isBanned: false };
+}
+
+// === ПОЛУЧЕНИЕ МЕДАЛЕК ПОЛЬЗОВАТЕЛЯ ===
+async function getUserMedals(userId) {
+    const { data: userMedals } = await _supabase
+        .from('user_medals')
+        .select('*, medals(*), awarded_by:users!user_medals_awarded_by_fkey(username)')
+        .eq('user_id', userId);
+    
+    return userMedals || [];
+}
+
+// === ОТОБРАЖЕНИЕ МЕДАЛЕК В ПРОФИЛЕ ===
+async function displayUserMedals(userId, container) {
+    const medals = await getUserMedals(userId);
+    
+    container.innerHTML = '';
+    
+    if (medals.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-dim); font-size:0.8rem;">Нет медалек</div>';
+        return;
+    }
+    
+    medals.forEach(item => {
+        const medal = item.medals;
+        const medalDiv = document.createElement('div');
+        medalDiv.className = 'medal-item';
+        medalDiv.setAttribute('data-medal-id', medal.id);
+        medalDiv.setAttribute('data-medal-name', medal.name);
+        medalDiv.setAttribute('data-medal-desc', medal.description);
+        medalDiv.setAttribute('data-medal-awarded', new Date(item.awarded_at).toLocaleDateString('ru-RU'));
+        medalDiv.setAttribute('data-medal-awarded-by', item.awarded_by?.username || 'OWNER');
+        
+        medalDiv.onclick = () => showMedalInfo(medalDiv);
+        
+        medalDiv.innerHTML = `
+            <div style="width:50px; height:50px; cursor:pointer; transition:transform 0.2s;" 
+                 onmouseover="this.style.transform='scale(1.1)'" 
+                 onmouseout="this.style.transform='scale(1)'">
+                ${medal.icon_svg}
+            </div>
+        `;
+        
+        container.appendChild(medalDiv);
+    });
+}
+
+// === ПОКАЗ ИНФОРМАЦИИ О МЕДАЛЬКЕ ===
+window.showMedalInfo = function(medalElement) {
+    const name = medalElement.getAttribute('data-medal-name');
+    const desc = medalElement.getAttribute('data-medal-desc');
+    const awarded = medalElement.getAttribute('data-medal-awarded');
+    const awardedBy = medalElement.getAttribute('data-medal-awarded-by');
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content" style="max-width:400px;">
+            <div class="cyber-modal-header">
+                <h3>>> ${name}</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body" style="text-align:center;">
+                <div style="width:100px; height:100px; margin:20px auto;">
+                    ${medalElement.querySelector('svg')?.outerHTML || ''}
+                </div>
+                <p style="margin:20px 0; color:var(--text-dim);">${desc}</p>
+                <p style="font-size:0.8rem;">Выдана: ${awarded}</p>
+                <p style="font-size:0.8rem; color:var(--green);">Кем: ${awardedBy}</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+};
+
+// === КНОПКИ ДЛЯ OWNER В ПРОФИЛЕ ===
+async function addOwnerButtonsToProfile(profileUser) {
+    const container = document.getElementById('profile-owner-actions');
+    if (!container) return;
+    
+    if (!isOwner(currentUser)) {
+        container.style.display = 'none';
+        return;
+    }
+    
+    container.style.display = 'block';
+    container.innerHTML = '';
+    
+    const { data: availableMedals } = await _supabase
+        .from('medals')
+        .select('*')
+        .order('name');
+    
+    const medalBtn = document.createElement('button');
+    medalBtn.className = 'cyber-btn-outline';
+    medalBtn.style.margin = '5px';
+    medalBtn.style.background = 'var(--green-dim)';
+    medalBtn.innerHTML = '🏅 Дать медальку';
+    medalBtn.onclick = () => showAwardMedalModal(profileUser.id, availableMedals);
+    container.appendChild(medalBtn);
+    
+    const verifyBtn = document.createElement('button');
+    verifyBtn.className = 'cyber-btn-outline';
+    verifyBtn.style.margin = '5px';
+    verifyBtn.style.background = '#4169E1';
+    verifyBtn.style.color = 'white';
+    verifyBtn.innerHTML = '✓ Дать галочку';
+    verifyBtn.onclick = () => toggleUserVerification(profileUser.id, !profileUser.is_verified);
+    container.appendChild(verifyBtn);
+    
+    const banStatus = await checkUserBan(profileUser.id);
+    
+    const banBtn = document.createElement('button');
+    banBtn.className = 'cyber-btn-outline';
+    banBtn.style.margin = '5px';
+    
+    if (banStatus.isBanned) {
+        banBtn.style.background = 'var(--red)';
+        banBtn.style.color = 'white';
+        banBtn.innerHTML = '🔴 Снять бан';
+        banBtn.onclick = () => removeUserBan(profileUser.id);
+    } else {
+        banBtn.style.background = '#ff9800';
+        banBtn.style.color = 'white';
+        banBtn.innerHTML = '⛔ Забанить';
+        banBtn.onclick = () => showBanModal(profileUser.id);
+    }
+    container.appendChild(banBtn);
+}
+
+// === МОДАЛКА ВЫДАЧИ МЕДАЛЬКИ ===
+function showAwardMedalModal(userId, availableMedals) {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>>> ВЫДАТЬ МЕДАЛЬКУ</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:10px; max-height:400px; overflow-y:auto;">
+                    ${availableMedals.map(medal => `
+                        <div onclick="awardMedalToUser('${userId}', '${medal.id}')" 
+                             style="padding:15px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-md); cursor:pointer; text-align:center; transition:0.2s;"
+                             onmouseover="this.style.borderColor='var(--green)'"
+                             onmouseout="this.style.borderColor='var(--border)'">
+                            <div style="width:60px; height:60px; margin:0 auto 10px;">
+                                ${medal.icon_svg}
+                            </div>
+                            <div style="font-weight:600;">${medal.name}</div>
+                            <div style="font-size:0.7rem; color:var(--text-dim);">${medal.description}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// === ВЫДАТЬ МЕДАЛЬКУ ===
+window.awardMedalToUser = async function(userId, medalId) {
+    const { error } = await _supabase
+        .from('user_medals')
+        .insert([{
+            user_id: userId,
+            medal_id: medalId,
+            awarded_by: currentUser.id
+        }]);
+    
+    if (error) {
+        if (error.code === '23505') {
+            alert('❌ У пользователя уже есть эта медалька');
+        } else {
+            alert('❌ Ошибка: ' + error.message);
+        }
+        return;
+    }
+    
+    alert('✅ Медалька выдана!');
+    document.querySelector('.modal.active')?.remove();
+    
+    const medalsContainer = document.getElementById('profile-medals');
+    if (medalsContainer) {
+        await displayUserMedals(userId, medalsContainer);
+    }
+};
+
+// === ПЕРЕКЛЮЧЕНИЕ ГАЛОЧКИ ===
+window.toggleUserVerification = async function(userId, verified) {
+    const { error } = await _supabase
+        .from('users')
+        .update({ is_verified: verified })
+        .eq('id', userId);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert(verified ? '✅ Галочка выдана!' : '✅ Галочка убрана!');
+    
+    const user = currentProfileUser;
+    if (user && user.id === userId) {
+        user.is_verified = verified;
+        const usernameEl = document.getElementById('profile-username');
+        if (usernameEl) {
+            if (isOwner(user)) {
+                usernameEl.innerHTML = '<span class="owner-username-large">✓ [owner] ' + user.username + '</span>';
+            } else if (verified) {
+                usernameEl.innerHTML = '<span style="color:var(--cyan);">✓ ' + user.username + '</span>';
+            } else {
+                usernameEl.textContent = '@' + user.username;
+            }
+        }
+    }
+};
+
+// === МОДАЛКА БАНА ===
+function showBanModal(userId) {
+    const modal = document.createElement('div');
+    modal.className = 'modal active';
+    modal.innerHTML = `
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>>> ЗАБАНИТЬ ПОЛЬЗОВАТЕЛЯ</h3>
+                <button class="close-modal" onclick="this.closest('.modal').remove()">✕</button>
+            </div>
+            <div class="cyber-modal-body">
+                <label class="cyber-label">Причина бана:</label>
+                <input type="text" id="ban-reason" placeholder="Нарушение правил..." style="width:100%; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); border-radius:var(--radius-md); margin-bottom:15px;">
+                
+                <label class="cyber-label">Длительность:</label>
+                <select id="ban-duration" style="width:100%; padding:10px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text); border-radius:var(--radius-md); margin-bottom:20px;">
+                    <option value="1">1 час</option>
+                    <option value="3">3 часа</option>
+                    <option value="6">6 часов</option>
+                    <option value="12">12 часов</option>
+                    <option value="24">24 часа</option>
+                    <option value="72">3 дня</option>
+                    <option value="168">7 дней</option>
+                    <option value="720">30 дней</option>
+                </select>
+                
+                <button onclick="banUser('${userId}')" class="cyber-btn-primary" style="background:var(--red);">>> ЗАБАНИТЬ</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// === ЗАБАНИТЬ ПОЛЬЗОВАТЕЛЯ ===
+window.banUser = async function(userId) {
+    const reason = document.getElementById('ban-reason')?.value.trim() || 'Нарушение правил';
+    const duration = parseInt(document.getElementById('ban-duration')?.value || '24');
+    
+    const banUntil = new Date();
+    banUntil.setHours(banUntil.getHours() + duration);
+    
+    await _supabase
+        .from('user_bans')
+        .delete()
+        .eq('user_id', userId);
+    
+    const { error } = await _supabase
+        .from('user_bans')
+        .insert([{
+            user_id: userId,
+            banned_by: currentUser.id,
+            ban_until: banUntil,
+            reason: reason
+        }]);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert(`✅ Пользователь забанен до ${banUntil.toLocaleString('ru-RU')}`);
+    document.querySelector('.modal.active')?.remove();
+    
+    if (currentProfileUser && currentProfileUser.id === userId) {
+        showProfile(userId);
+    }
+};
+
+// === СНЯТЬ БАН ===
+window.removeUserBan = async function(userId) {
+    const { error } = await _supabase
+        .from('user_bans')
+        .delete()
+        .eq('user_id', userId);
+    
+    if (error) {
+        alert('❌ Ошибка: ' + error.message);
+        return;
+    }
+    
+    alert('✅ Бан снят');
+    
+    if (currentProfileUser && currentProfileUser.id === userId) {
+        showProfile(userId);
+    }
+};
 startClanChatAutoRefresh();
